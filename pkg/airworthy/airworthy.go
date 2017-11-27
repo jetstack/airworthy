@@ -1,19 +1,16 @@
 package airworthy
 
 import (
-	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/cavaliercoder/grab"
 	"golang.org/x/crypto/openpgp"
 
-	"github.com/jetstack/airworthy/pkg/cacertificates"
 	"github.com/jetstack/airworthy/pkg/gnupg"
 )
 
@@ -21,13 +18,18 @@ type Flags struct {
 	ChecksumSHA256 string
 	Signature      string
 	URL            string
-	Destination    string
+	Output         string
+
+	dirPermission  os.FileMode
+	filePermission os.FileMode
 
 	Unarchive *bool
 }
 
 type Airworthy struct {
 	log *logrus.Entry
+
+	httpClient *http.Client
 }
 
 func New(log *logrus.Entry) *Airworthy {
@@ -55,17 +57,16 @@ func (a *Airworthy) initFlags(flags *Flags) error {
 	}
 
 	// by default set to base name of URL
-	if flags.Destination == "" {
-		flags.Destination = filepath.Base(flags.URL)
-		a.log.WithField("destination", flags.Destination).Debug("set destination")
+	if flags.Output == "" {
+		flags.Output = filepath.Base(flags.URL)
+		a.log.WithField("output", flags.Output).Debug("set output")
 	}
 
+	flags.dirPermission = 0755
+	flags.filePermission = 0755
+
 	return nil
 
-}
-
-func (a *Airworthy) checkDestination(flags *Flags) error {
-	return nil
 }
 
 func (a *Airworthy) Run(flags *Flags) error {
@@ -79,7 +80,7 @@ func (a *Airworthy) Run(flags *Flags) error {
 
 	// check if exists
 	var exists bool
-	if stat, err := os.Stat(flags.Destination); os.IsNotExist(err) {
+	if stat, err := os.Stat(flags.Output); os.IsNotExist(err) {
 		exists = false
 		// TODO: check if the directory exists
 	} else if err != nil {
@@ -87,7 +88,7 @@ func (a *Airworthy) Run(flags *Flags) error {
 	} else if stat.Mode().IsRegular() {
 		exists = true
 	} else {
-		return fmt.Errorf("not a regular file: %s", flags.Destination)
+		return fmt.Errorf("not a regular file: %s", flags.Output)
 	}
 
 	// gnupg
@@ -99,77 +100,54 @@ func (a *Airworthy) Run(flags *Flags) error {
 		a.log.Debugf("keyring contains: %s", gnupg.KeyToString(key))
 	}
 
-	// setup http client with built in CA
-	rootCAs, err := cacertificates.Roots()
-	if err != nil {
-		return err
-	}
-
 	// download signature
-	httpTransport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			RootCAs: rootCAs,
-		},
-	}
-	httpClient := &http.Client{
-		Transport: httpTransport,
-	}
-	sigReq, err := http.NewRequest("GET", flags.Signature, nil)
+	signatureReader, err := a.Download(flags.Signature)
 	if err != nil {
-		return err
+		return fmt.Errorf("error getting signature: %s", err)
 	}
-	sigResp, err := httpClient.Do(sigReq)
-	if err != nil {
-		return err
-	}
-	defer sigResp.Body.Close()
-
-	if sigResp.StatusCode > 400 {
-		return fmt.Errorf("unexpected response code %d from signature (%s)", sigResp.StatusCode, flags.Signature)
-	}
+	defer signatureReader.Reader.Close()
 
 	if !exists {
-		// download binary
-		grabClient := grab.NewClient()
-		grabClient.HTTPClient.Transport = httpTransport
+		dirPath := filepath.Dir(flags.Output)
+		if dirPath != "" {
+			//ensure dir
+			if stat, err := os.Stat(dirPath); os.IsNotExist(err) {
+				err := os.MkdirAll(dirPath, flags.dirPermission)
+				if err != nil {
+					return err
+				}
+			} else if err != nil {
+				return err
+			} else if !stat.Mode().IsDir() {
+				return fmt.Errorf("output directory %s is not a directory", dirPath)
+			}
+		}
 
-		req, err := grab.NewRequest(flags.Destination, flags.URL)
+		fileOutput, err := os.OpenFile(flags.Output, os.O_RDWR|os.O_CREATE, flags.filePermission)
 		if err != nil {
 			return err
 		}
+		defer fileOutput.Close()
 
 		// start download
-		a.log.Infof("downloading %v...\n", req.URL())
-		resp := grabClient.Do(req)
-		a.log.Infof("  %v\n", resp.HTTPResponse.Status)
-
-		// start UI loop
-		t := time.NewTicker(500 * time.Millisecond)
-		defer t.Stop()
-
-	Loop:
-		for {
-			select {
-			case <-t.C:
-				a.log.Debugf("  transferred %v / %v bytes (%.2f%%)\n",
-					resp.BytesComplete(),
-					resp.Size,
-					100*resp.Progress())
-
-			case <-resp.Done:
-				// download is complete
-				break Loop
-			}
-		}
-		// check for errors
-		if err := resp.Err(); err != nil {
+		a.log.Infof("downloading %s", flags.URL)
+		downloadReader, err := a.Download(flags.URL)
+		if err != nil {
 			return err
 		}
+		defer downloadReader.Reader.Close()
 
-		a.log.Infof("download saved to ./%v \n", resp.Filename)
+		// copy into file
+		if _, err := io.Copy(fileOutput, downloadReader.Reader); err != nil {
+			return fmt.Errorf("error during copy: %s", err)
+		}
+
+		fileOutput.Close()
+		a.log.Infof("downloaded to %s", flags.Output)
+
 	}
 
-	file, err := os.Open(flags.Destination)
+	file, err := os.Open(flags.Output)
 	if err != nil {
 		return err
 	}
@@ -178,7 +156,7 @@ func (a *Airworthy) Run(flags *Flags) error {
 	signer, err := openpgp.CheckArmoredDetachedSignature(
 		keyring,
 		file,
-		sigResp.Body,
+		signatureReader,
 	)
 	if err != nil {
 		return err

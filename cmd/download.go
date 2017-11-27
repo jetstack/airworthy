@@ -21,5 +21,13 @@ var downloadCmd = &cobra.Command{
 }
 
 func init() {
+	downloadCmd.Flags().StringVarP(
+		&flags.Output,
+		"output",
+		"o",
+		"",
+		"specify an output path",
+	)
+
 	RootCmd.AddCommand(downloadCmd)
 }
