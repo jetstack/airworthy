@@ -8,12 +8,6 @@
   version = "v1.0.3"
 
 [[projects]]
-  name = "github.com/cavaliercoder/grab"
-  packages = ["."]
-  revision = "e2cf8055a943781c5f6424590b0495cd59f616f0"
-  version = "v2.0.0"
-
-[[projects]]
   name = "github.com/inconshreveable/mousetrap"
   packages = ["."]
   revision = "76626ae9c91c4f2a10f34cad8ce83ea42c93bb75"
@@ -46,6 +40,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "55cd4f5fe9f541c09509623606120e47599a5ca64c4fc4d5c04efdd0288d4e88"
+  inputs-digest = "ce06034e8b200e9121b9d06b5ae9b971acec0b07fc8184c763ec6d977b910b9c"
   solver-name = "gps-cdcl"
   solver-version = 1
