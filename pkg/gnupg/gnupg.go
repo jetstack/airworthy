@@ -18,7 +18,7 @@ func TrustedKeyring() (openpgp.EntityList, error) {
 
 	var keyRing openpgp.EntityList
 
-	for _, key := range []armoredKey{jetstackReleasesAscBytes, hashicorpAscBytes} {
+	for _, key := range []armoredKey{jetstackReleasesAscBytes, hashicorpAscBytes, coreosAppSigningAscBytes} {
 		data, err := key()
 		if err != nil {
 			return nil, err
