@@ -1,24 +1,27 @@
 package airworthy
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
 
 	"github.com/Sirupsen/logrus"
-	"golang.org/x/crypto/openpgp"
 
 	"github.com/jetstack/airworthy/pkg/gnupg"
 )
 
 type Flags struct {
-	ChecksumSHA256 string
-	Signature      string
-	URL            string
-	Output         string
+	SHA256Sums       string
+	SignatureBinary  string
+	SignatureArmored string
+
+	URL    string
+	Output string
 
 	dirPermission  os.FileMode
 	filePermission os.FileMode
@@ -51,9 +54,13 @@ func (a *Airworthy) initFlags(flags *Flags) error {
 	}
 
 	// by default download signature file from same url and only append .asc
-	if flags.Signature == "" && flags.ChecksumSHA256 == "" {
-		flags.Signature = fmt.Sprintf("%s.asc", flags.URL)
-		a.log.WithField("signature", flags.Signature).Debug("set signature to URL")
+	if flags.SignatureArmored == "" && flags.SignatureBinary == "" {
+		if flags.SHA256Sums == "" {
+			flags.SignatureArmored = fmt.Sprintf("%s.asc", flags.URL)
+		} else {
+			flags.SignatureArmored = fmt.Sprintf("%s.asc", flags.SHA256Sums)
+		}
+		a.log.WithField("signature-armored", flags.SignatureArmored).Debug("guessed signature URL")
 	}
 
 	// by default set to base name of URL
@@ -78,6 +85,16 @@ func (a *Airworthy) Run(flags *Flags) error {
 		return err
 	}
 
+	// get checksum file, if neccessary
+	var sha256sum []byte
+	checkSHA256sum := flags.SHA256Sums != ""
+	if checkSHA256sum {
+		sha256sum, err = a.getSHA256Sum(flags)
+		if err != nil {
+			return err
+		}
+	}
+
 	// check if exists
 	var exists bool
 	if stat, err := os.Stat(flags.Output); os.IsNotExist(err) {
@@ -91,21 +108,7 @@ func (a *Airworthy) Run(flags *Flags) error {
 		return fmt.Errorf("not a regular file: %s", flags.Output)
 	}
 
-	// gnupg
-	keyring, err := gnupg.TrustedKeyring()
-	if err != nil {
-		return fmt.Errorf("error building keyring: %s", err)
-	}
-	for _, key := range keyring {
-		a.log.Debugf("keyring contains: %s", gnupg.KeyToString(key))
-	}
-
-	// download signature
-	signatureReader, err := a.Download(flags.Signature)
-	if err != nil {
-		return fmt.Errorf("error getting signature: %s", err)
-	}
-	defer signatureReader.Reader.Close()
+	var contents io.ReadSeeker
 
 	if !exists {
 		dirPath := filepath.Dir(flags.Output)
@@ -123,12 +126,6 @@ func (a *Airworthy) Run(flags *Flags) error {
 			}
 		}
 
-		fileOutput, err := os.OpenFile(flags.Output, os.O_RDWR|os.O_CREATE, flags.filePermission)
-		if err != nil {
-			return err
-		}
-		defer fileOutput.Close()
-
 		// start download
 		a.log.Infof("downloading %s", flags.URL)
 		downloadReader, err := a.Download(flags.URL)
@@ -137,32 +134,55 @@ func (a *Airworthy) Run(flags *Flags) error {
 		}
 		defer downloadReader.Reader.Close()
 
-		// copy into file
-		if _, err := io.Copy(fileOutput, downloadReader.Reader); err != nil {
-			return fmt.Errorf("error during copy: %s", err)
+		// copy contents into buffer
+		downloadBuffer, err := ioutil.ReadAll(downloadReader.Reader)
+		if err != nil {
+			return fmt.Errorf("error during download: %s", err)
 		}
-
-		fileOutput.Close()
 		a.log.Infof("downloaded to %s", flags.Output)
 
+		contents = bytes.NewReader(downloadBuffer)
 	}
 
-	file, err := os.Open(flags.Output)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	signer, err := openpgp.CheckArmoredDetachedSignature(
-		keyring,
-		file,
-		signatureReader,
-	)
-	if err != nil {
-		return err
+	if exists {
+		file, err := os.Open(flags.Output)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		contents = file
 	}
 
-	a.log.Infof("successfully signed by %s", gnupg.KeyToString(signer))
+	if checkSHA256sum {
+		if err := a.checkSHA256Sum(sha256sum, contents); err != nil {
+			return err
+		}
+		a.log.Infof("contents match sha256_hash=%x", sha256sum)
+	} else {
+		signer, err := a.verify(flags, contents)
+		if err != nil {
+			return err
+		}
+		a.log.Infof("contents successfully signed by %s", gnupg.KeyToString(signer))
+	}
+
+	// write to file if not existed
+	if !exists {
+		fileOutput, err := os.OpenFile(flags.Output, os.O_RDWR|os.O_CREATE, flags.filePermission)
+		if err != nil {
+			return err
+		}
+		defer fileOutput.Close()
+
+		if _, err := contents.Seek(0, 0); err != nil {
+			return err
+		}
+
+		if _, err := io.Copy(fileOutput, contents); err != nil {
+			return err
+		}
+
+	}
 
 	return nil
 }

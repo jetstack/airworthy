@@ -29,5 +29,28 @@ func init() {
 		"specify an output path",
 	)
 
+	downloadCmd.Flags().StringVarP(
+		&flags.SignatureArmored,
+		"signature-armored",
+		"s",
+		"",
+		"specify an URL for the armored signature file",
+	)
+
+	downloadCmd.Flags().StringVarP(
+		&flags.SignatureBinary,
+		"signature-binary",
+		"S",
+		"",
+		"specify an URL for the armored signature file",
+	)
+
+	downloadCmd.Flags().StringVar(
+		&flags.SHA256Sums,
+		"sha256sums",
+		"",
+		"specify an URL for the sha256sum file",
+	)
+
 	RootCmd.AddCommand(downloadCmd)
 }
